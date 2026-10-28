@@ -255,3 +255,135 @@ def list_users(cfg, db, selected='', query='', nested=True):
                       'groups': [str(g) for g in groups]})
     return {'ou': selected, 'include_nested': nested, 'users': sorted(users,key=lambda x:(x['name'].casefold(),x['username'].casefold())),
             'truncated': truncated, 'count': len(users)}
+
+
+def domain_dn(dn):
+    """The trailing DC RDNs identify the domain, even for an OU-restricted base."""
+    parts = parse_dn(dn, escape=False, strip=True)
+    i = len(parts)
+    while i and parts[i-1][0].casefold() == 'dc':
+        i -= 1
+    return ','.join(a+'='+v for a,v,_ in parts[i:])
+
+
+def domain_identity(conn, dn):
+    root = domain_dn(dn)
+    dns = '.'.join(v for a,v,_ in parse_dn(root)) if root else ''
+    result = {'dns': dns, 'netbios': ''}
+    # NetBIOS names are not necessarily the first label of the DNS domain.
+    # If Configuration is unreadable, do not guess and link a different account.
+    try:
+        conn.search('', '(objectClass=*)', search_scope=ldap3.BASE,
+                    attributes=['configurationNamingContext'], time_limit=3)
+        attrs = next((r['attributes'] for r in conn.response if r.get('type') == 'searchResEntry'), {})
+        config = scalar(attrs, 'configurationNamingContext')
+        if config and root:
+            conn.search('CN=Partitions,'+config, '(&(objectClass=crossRef)(nCName='+escape_filter_chars(root)+'))',
+                        search_scope=ldap3.LEVEL, attributes=['nETBIOSName'], time_limit=3)
+            attrs = next((r['attributes'] for r in conn.response if r.get('type') == 'searchResEntry'), {})
+            result['netbios'] = str(scalar(attrs, 'nETBIOSName'))
+    except (ldap3.core.exceptions.LDAPException, OSError):
+        pass
+    return result
+
+
+def sid_string(value):
+    if isinstance(value, str):
+        return value if re.fullmatch(r'S-\d+(?:-\d+)+', value, re.I) else ''
+    if not isinstance(value, bytes) or len(value) < 8:
+        return ''
+    count = value[1]
+    if len(value) != 8+count*4:
+        return ''
+    return 'S-'+str(value[0])+'-'+str(int.from_bytes(value[2:8], 'big'))+''.join(
+        '-'+str(int.from_bytes(value[i:i+4], 'little')) for i in range(8,len(value),4))
+
+
+def get_user(cfg, db, dn):
+    """Resolve identity from AD, never from a caller-supplied username or SID."""
+    if not cfg['enabled']:
+        raise DirectoryError('AD connection is disabled.', 409)
+    if not within_base(dn, cfg['base_dn']):
+        raise DirectoryError('User must be within the configured Base DN.', 403)
+    with open_directory(cfg, db) as conn:
+        conn.search(dn, '(&(objectCategory=person)(objectClass=user))', search_scope=ldap3.BASE,
+                    attributes=['displayName','sAMAccountName','userPrincipalName','objectSid'], time_limit=5)
+        row = next((r for r in conn.response if r.get('type') == 'searchResEntry'), None)
+        if conn.result.get('result', 0) != 0 or not row:
+            raise DirectoryError('AD user no longer exists or is not readable.', 404)
+        a = row['attributes']
+        identity = domain_identity(conn, dn)
+        return {'dn':row['dn'], 'name':str(scalar(a,'displayName',scalar(a,'sAMAccountName'))),
+                'username':str(scalar(a,'sAMAccountName')), 'upn':str(scalar(a,'userPrincipalName')),
+                'sid':sid_string(scalar(a,'objectSid')), 'domain':identity}
+
+
+def list_computers(cfg, db, selected='', query='', nested=True):
+    if not cfg['enabled']:
+        raise DirectoryError('AD connection is not configured or is disabled.', 409)
+    selected = selected or cfg['base_dn']
+    if not within_base(selected, cfg['base_dn']):
+        raise DirectoryError('Selected OU must be within the configured Base DN.', 403)
+    if not isinstance(query, str) or len(query) > 200:
+        raise DirectoryError('Search must be 200 characters or fewer.')
+    f = '(&(objectClass=computer)'
+    if query:
+        q = escape_filter_chars(query)
+        f += f'(|(name=*{q}*)(sAMAccountName=*{q}*)(dNSHostName=*{q}*)(operatingSystem=*{q}*))'
+    f += ')'
+    fields = ['name','sAMAccountName','dNSHostName','operatingSystem','operatingSystemVersion',
+              'description','userAccountControl','lastLogonTimestamp','managedBy']
+    with open_directory(cfg, db) as conn:
+        if dn_parts(selected) != dn_parts(cfg['base_dn']):
+            conn.search(selected, '(objectClass=organizationalUnit)', search_scope=ldap3.BASE,
+                        attributes=['ou'], time_limit=5)
+            if conn.result.get('result',0) != 0 or not any(x.get('type')=='searchResEntry' for x in conn.response):
+                raise DirectoryError('Selected OU no longer exists or is not readable.',404)
+        entries, truncated = search_entries(conn,selected,f,fields,ldap3.SUBTREE if nested else ldap3.LEVEL)
+    computers = []
+    for x in entries:
+        a = x['attributes']
+        try: enabled = not bool(int(scalar(a,'userAccountControl','')) & 2)
+        except (ValueError,TypeError): enabled = None
+        sam = str(scalar(a,'sAMAccountName'))
+        computers.append({'dn':x['dn'],'name':str(scalar(a,'name',sam.rstrip('$'))),
+                          'account':sam,'dns_host':str(scalar(a,'dNSHostName')),
+                          'os':str(scalar(a,'operatingSystem')),'os_version':str(scalar(a,'operatingSystemVersion')),
+                          'description':str(scalar(a,'description')),'enabled':enabled,
+                          'last_logon_replicated':filetime(scalar(a,'lastLogonTimestamp')),
+                          'managed_by':str(scalar(a,'managedBy'))})
+    return {'ou':selected,'include_nested':nested,'computers':sorted(computers,key=lambda x:x['name'].casefold()),
+            'count':len(computers),'truncated':truncated}
+
+
+def match_user_device(user, device):
+    """Observed console identity is evidence, never device ownership or authorization."""
+    user_sid = user.get('sid','').casefold()
+    device_sid = sid_string(device.get('userSid','')).casefold()
+    if user_sid and device_sid:
+        return 'SID' if user_sid == device_sid else ''
+    observed = str(device.get('user','')).strip().casefold()
+    upn = user.get('upn','').strip().casefold()
+    if upn and observed == upn:
+        return 'UPN'
+    sam = user.get('username','').strip().casefold()
+    domain = user.get('domain',{})
+    # Reject bare usernames and local PC\user names; do not guess NetBIOS labels.
+    if sam:
+        for prefix in [domain.get('dns',''), domain.get('netbios','')]:
+            if prefix and observed == prefix.casefold()+'\\'+sam:
+                return 'Domain-qualified username'
+    return ''
+
+
+def match_computer_device(computer, device):
+    root = domain_dn(computer['dn'])
+    dns = '.'.join(v for a,v,_ in parse_dn(root)).casefold() if root else ''
+    if not dns or str(device.get('domain','')).strip().rstrip('.').casefold() != dns:
+        return False
+    expected = {computer.get('name','').casefold(),computer.get('account','').rstrip('$').casefold()}
+    hostname = computer.get('dns_host','').rstrip('.').casefold()
+    if hostname:
+        expected.add(hostname)
+    name = str(device.get('name','')).strip().rstrip('.').casefold()
+    return bool(name and name in expected)

@@ -67,7 +67,7 @@ def valid_records(data):
         if not isinstance(d,dict) or not NAME.fullmatch(str(d.get('name',''))): raise Fail(400,'Invalid computer name')
         apps=d.get('apps',[])
         if not isinstance(apps,list) or len(apps)>5000 or any(not isinstance(a,dict) or not isinstance(a.get('name'),str) for a in apps): raise Fail(400,'Invalid apps array')
-        fields=['name','type','user','cpu','ddr','storage','uptime','model','domain','ip','boot','collectedAt','os','serial']
+        fields=['name','type','user','cpu','ddr','storage','uptime','model','domain','ip','boot','collectedAt','os','serial','userSid']
         x={k:str(d.get(k,'Unknown'))[:4000] for k in fields}
         try: x['ram']=float(d.get('ram',0))
         except (TypeError,ValueError): raise Fail(400,'Invalid RAM')
@@ -75,6 +75,20 @@ def valid_records(data):
         x['apps']=[{'name':a['name'][:500],'version':str(a.get('version',''))[:100]} for a in apps]
         clean.append(x)
     return clean
+
+def inventory_record(row):
+    d=json.loads(row['payload']); age=time.time()-row['received']
+    d.update({'receivedAt':row['received'],'source':row['source'],
+              'status':('Recent' if age<1200 else 'Stale') if row['source']=='agent' else 'Snapshot'})
+    return d
+
+
+def inventory_summary(row):
+    d=inventory_record(row)
+    keys=['name','type','domain','user','userSid','cpu','ram','ddr','storage','os','model',
+          'collectedAt','receivedAt','source','status']
+    return {k:d.get(k,'') for k in keys}
+
 
 def application(env, start_response):
     headers=[('Cache-Control','no-store'),('X-Content-Type-Options','nosniff'),('X-Frame-Options','DENY'),('Referrer-Policy','same-origin'),('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'")]
@@ -160,11 +174,41 @@ def application(env, start_response):
                         if nested not in ['0','1']: raise Fail(400,'nested must be 0 or 1')
                         body=directory.list_users(directory.load_settings(c),DB,args.get('ou',[''])[0],args.get('q',[''])[0],nested=='1')
                         log(c,u['email'],'ad.users.read',body['count'])
+                    elif path=='/api/ad/computers' and method=='GET':
+                        require('directory.read'); args=parse_qs(env.get('QUERY_STRING',''),keep_blank_values=True)
+                        nested=args.get('nested',['1'])[0]
+                        if nested not in ['0','1']: raise Fail(400,'nested must be 0 or 1')
+                        body=directory.list_computers(directory.load_settings(c),DB,args.get('ou',[''])[0],args.get('q',[''])[0],nested=='1')
+                        readable=bool(u['admin'] or 'inventory.read' in json.loads(u['permissions']))
+                        body['inventory_visible']=readable
+                        if readable:
+                            summaries=[inventory_summary(r) for r in c.execute('SELECT * FROM devices')]
+                            by_name={str(d['name']).casefold():d for d in summaries}
+                        for computer in body['computers']:
+                            computer['inventory']=None
+                            if readable:
+                                names=[computer['name'],computer['account'].rstrip('$'),computer['dns_host']]
+                                candidates=[by_name[n.casefold()] for n in names if n.casefold() in by_name]
+                                matches=[d for d in candidates if directory.match_computer_device(computer,d)]
+                                if matches: computer['inventory']=max(matches,key=lambda d:d['receivedAt'])
+                        log(c,u['email'],'ad.computers.read',body['count'])
+                    elif path=='/api/ad/user-devices' and method=='GET':
+                        require('directory.read'); require('inventory.read')
+                        args=parse_qs(env.get('QUERY_STRING',''),keep_blank_values=True)
+                        user=directory.get_user(directory.load_settings(c),DB,args.get('dn',[''])[0]); matched=[]
+                        for row in c.execute('SELECT * FROM devices ORDER BY received DESC'):
+                            d=inventory_summary(row); evidence=directory.match_user_device(user,d)
+                            if evidence: matched.append({**d,'match_method':evidence})
+                        body={'user':user,'devices':matched,'count':len(matched),
+                              'basis':'Latest console user reported per device; not ownership, live sessions or full history.'}
+                        log(c,u['email'],'ad.user-devices.read',len(matched))
+                    elif path=='/api/device' and method=='GET':
+                        require('inventory.read'); args=parse_qs(env.get('QUERY_STRING',''),keep_blank_values=True)
+                        row=c.execute('SELECT * FROM devices WHERE name=?',(args.get('name',[''])[0],)).fetchone()
+                        if not row: raise Fail(404,'Inventory not found. Run the collector on this computer first.')
+                        body=inventory_record(row)
                     elif path=='/api/devices' and method=='GET':
-                        require('inventory.read'); result=[]
-                        for r in c.execute('SELECT * FROM devices ORDER BY name'):
-                            d=json.loads(r['payload']); age=now-r['received']; d.update({'receivedAt':r['received'],'source':r['source'],'status':('Recent' if age<1200 else 'Stale') if r['source']=='agent' else 'Snapshot'});result.append(d)
-                        body=result
+                        require('inventory.read'); body=[inventory_record(r) for r in c.execute('SELECT * FROM devices ORDER BY name')]
                     elif path=='/api/import' and method=='POST':
                         require('inventory.import'); records=valid_records(data)
                         for d in records: c.execute('INSERT INTO devices VALUES(?,?,?,?) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload,received=excluded.received,source=excluded.source',(d['name'],json.dumps(d),now,'import'))

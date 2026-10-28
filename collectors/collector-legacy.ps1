@@ -37,8 +37,16 @@ $portable=$false
 foreach($e in $enclosure){foreach($t in $e.ChassisTypes){if(@(8,9,10,14,30,31,32) -contains [int]$t){$portable=$true}}}
 $deviceType='Desktop'
 if($portable){$deviceType='Laptop'}elseif([int]$os.ProductType -ne 1){$deviceType='Server'}
+# Resolve the observed user's SID when possible; failure leaves name-based matching.
+$userSid=''
+if($cs.UserName){
+ try {
+  $account=New-Object System.Security.Principal.NTAccount -ArgumentList ([string]$cs.UserName)
+  $userSid=$account.Translate([System.Security.Principal.SecurityIdentifier]).Value
+ }catch{}
+}
 $record=@{
- name=$env:COMPUTERNAME;type=$deviceType;user=[string]$cs.UserName
+ name=$env:COMPUTERNAME;type=$deviceType;user=[string]$cs.UserName;userSid=$userSid
  cpu=(@($cpu | ForEach-Object {$_.Name}) -join ' / ');ram=[math]::Round($cs.TotalPhysicalMemory/1GB,1);ddr=($ddr -join ' / ')
  storage=($diskRows -join ' + ');uptime=('{0}d {1}h {2}m' -f $uptime.Days,$uptime.Hours,$uptime.Minutes)
  model=[string]$cs.Model;domain=[string]$cs.Domain;ip=$ip;boot=$boot.ToUniversalTime().ToString('o')

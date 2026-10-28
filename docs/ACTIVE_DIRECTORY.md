@@ -59,7 +59,7 @@ The saved password field remains blank in the UI and API; blank preserves an exi
 
 `directory.read` grants OU and user browsing. Only administrators may read/change connection settings or run the saved connection test. The same directory Base DN applies to all authorized viewers; per-viewer OU restrictions are not implemented. Use a restricted Base DN and service-account ACL if needed.
 
-This feature does not create Nexus accounts for AD users, grant them application permissions, implement AD authentication/SSO or modify AD users/groups. It does not automatically associate directory users with endpoint inventory records. Those remain separate datasets.
+This feature does not create Nexus accounts for AD users, grant them application permissions, implement AD authentication/SSO or modify AD users/groups. It can correlate user identities with the latest endpoint inventory snapshots as described below. This observation is not an ownership or authorization assignment.
 
 Audit records include configuration changes (without credentials), connection tests and read counts. Do not enable LDAP protocol debug logging in production, as detailed traces may contain directory information.
 
@@ -77,3 +77,33 @@ Keep this key separately from shared reports and source control. If restoring a 
 ## Verification limits
 
 Automated tests cover SQLite settings/API permissions, encryption/redaction, DN boundaries, nested/direct OU scope, search filter injection handling, AD-sized paging, account status and TLS-before-bind behavior using LDAP fixtures and transport mocks. They are not a test against your actual AD 2012 R2 server. Docker image startup and a real DC certificate/network/bind must be verified in your environment.
+
+
+## Computers and observed user devices
+
+Upgrade the existing stack without replacing its `.env`, DNS overrides, certificates, enrollment tokens or persistent data:
+
+```sh
+cd /opt/nexus-inventory
+git pull --ff-only
+docker compose up -d --build nexus
+```
+
+Hard-refresh the browser (Ctrl+F5). Use **AD computers** in the sidebar or **Active Directory → Computers**. Select an OU and choose whether to include sub-OUs. **Entire configured base** includes the default `CN=Computers` container. A Base DN restricted to a user-only OU cannot show computer accounts in other OUs; choose a common parent Base DN when that is intended and permitted.
+
+Computer rows include name, DNS hostname, OS recorded in AD, enabled/disabled account state and approximate replicated last-logon time. The AD `managedBy` attribute is shown only as directory metadata, not as proof of ownership or logged-on user. Hardware, apps and current reachability cannot be obtained from an AD computer object alone. An AD record may remain after a PC has been retired.
+
+An inventory row is linked to a computer account only when its computer name (short name, computer account without `$`, or AD DNS hostname) and reported DNS domain match. Domain-mismatched / workgroup machines are not joined by short name alone. The inventory field is hidden unless the caller also has `inventory.read`. **Collector not linked** means no matching report; it does not mean the computer is powered off. Default AD computer search cap is 10,000 entries with the same time and paging protections as user queries.
+
+To see a user's machines, open **Active Directory → Users → User & devices → Observed devices**. This API requires both `directory.read` and `inventory.read`, resolves the selected user again from AD within the configured Base DN, and compares it with the latest saved report per endpoint:
+
+1. If AD and collector both supply a SID, require exact SID equality. A different SID blocks a name-based fallback.
+2. Otherwise accept an exact UPN, or the exact `DNS-domain\sAMAccountName` / verified `NetBIOS-domain\sAMAccountName` identity.
+3. The actual NetBIOS domain is read from AD RootDSE / Configuration Partitions cross-reference. It is not guessed from the first DNS label. If that optional metadata is unreadable, SID/UPN/DNS-qualified matching remains available.
+4. Bare usernames, empty users and unrelated local `PC\user` accounts are not linked.
+
+Each result shows matched identity, matching method, snapshot collection time, server receipt time and Recent/Stale/Snapshot status. Links describe the console user observed at that collection time. They do not indicate ownership, all live RDP sessions or all users who have ever used the machine. A later report for a different user replaces that association. Full login history is not retained. Collector/import metadata is administrative inventory data, not an authentication source.
+
+The updated collectors optionally translate `Win32_ComputerSystem.UserName` to a SID; if translation fails they continue collecting with the qualified username. Use Windows PowerShell as before. Download the updated collector to each endpoint; keep that endpoint's existing `endpoint.xml` and token. Review/unblock this downloaded script when your RemoteSigned policy requires it, or sign it according to an AllSigned policy. Trust the existing Nexus CA and run the collector while the intended user is signed into the console. Do not use the scheduled-task service account's identity as the observed user.
+
+A Server 2008/Win7–11 real-machine compatibility test of the new optional SID translation was not available during development. API and LDAP fixture tests exercise computer paging/scopes, domain collisions, user identity resolution, SID conflicts, stale snapshot behavior and permission boundaries. Your office deployment must still verify actual AD computers, collector reports and account formats.

@@ -30,6 +30,14 @@ Open **Active Directory → AD settings** as an administrator, enter your DC DNS
 
 See [AD setup guide](docs/ACTIVE_DIRECTORY.md) for Windows Server 2012 R2 prerequisites, permissions, secure configuration and upgrade steps.
 
+## AD computers and observed user devices
+
+Open **AD computers** to see domain computer accounts by OU, even before collectors are deployed. The **Entire configured base** selection also includes `CN=Computers`. Directory account state is separate from collector freshness. With `inventory.read`, matching collected data appears alongside each AD computer.
+
+In **Active Directory → Users**, open **User & devices** to see machines whose latest collector record identifies that user. Matching uses SID where available, otherwise an exact UPN or a domain-qualified username using the domain's verified DNS/NetBIOS identity. It never assigns ownership or guesses links from a bare username. Re-run updated collectors to add optional user SID reporting; existing records can still match qualified names.
+
+See [AD setup guide](docs/ACTIVE_DIRECTORY.md#computers-and-observed-user-devices) for limits and deployment steps.
+
 ## Tests
 
 ```sh

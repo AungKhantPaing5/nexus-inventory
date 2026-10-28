@@ -73,6 +73,7 @@ class IdentityMatchingTests(unittest.TestCase):
         raw=bytes([1,5])+int(5).to_bytes(6,'big')+b''.join(n.to_bytes(4,'little') for n in [21,1,2,3,1001])
         self.assertEqual(directory.sid_string(raw),self.u['sid'])
         self.assertEqual(directory.sid_string(raw[:-1]),'')
+        self.assertEqual(directory.entry_sid({'attributes':{'objectSid':['\\x01formatted']},'raw_attributes':{'objectSid':[raw]}}),self.u['sid'])
     def test_computer_domain_boundary(self):
         c={'dn':'CN=PC-01,'+OU,'name':'PC-01','account':'PC-01$','dns_host':'pc-01.example.local'}
         self.assertTrue(directory.match_computer_device(c,{'name':'pc-01','domain':'EXAMPLE.LOCAL'}))

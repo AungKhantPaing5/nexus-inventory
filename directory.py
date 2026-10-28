@@ -299,6 +299,18 @@ def sid_string(value):
         '-'+str(int.from_bytes(value[i:i+4], 'little')) for i in range(8,len(value),4))
 
 
+def entry_sid(entry):
+    # With get_info=NONE, ldap3 has no AD schema and can decode binary SID bytes
+    # as Unicode. Prefer the untouched LDAP raw_attributes before formatted data.
+    for source in ['raw_attributes','attributes']:
+        for key,value in entry.get(source,{}).items():
+            if key.casefold() == 'objectsid':
+                if isinstance(value,list): value=value[0] if value else ''
+                sid=sid_string(value)
+                if sid:return sid
+    return ''
+
+
 def get_user(cfg, db, dn):
     """Resolve identity from AD, never from a caller-supplied username or SID."""
     if not cfg['enabled']:
@@ -315,7 +327,7 @@ def get_user(cfg, db, dn):
         identity = domain_identity(conn, dn)
         return {'dn':row['dn'], 'name':str(scalar(a,'displayName',scalar(a,'sAMAccountName'))),
                 'username':str(scalar(a,'sAMAccountName')), 'upn':str(scalar(a,'userPrincipalName')),
-                'sid':sid_string(scalar(a,'objectSid')), 'domain':identity}
+                'sid':entry_sid(row), 'domain':identity}
 
 
 def list_computers(cfg, db, selected='', query='', nested=True):
@@ -332,7 +344,7 @@ def list_computers(cfg, db, selected='', query='', nested=True):
         f += f'(|(name=*{q}*)(sAMAccountName=*{q}*)(dNSHostName=*{q}*)(operatingSystem=*{q}*))'
     f += ')'
     fields = ['name','sAMAccountName','dNSHostName','operatingSystem','operatingSystemVersion',
-              'description','userAccountControl','lastLogonTimestamp','managedBy']
+              'description','userAccountControl','lastLogonTimestamp','managedBy','objectSid']
     with open_directory(cfg, db) as conn:
         if dn_parts(selected) != dn_parts(cfg['base_dn']):
             conn.search(selected, '(objectClass=organizationalUnit)', search_scope=ldap3.BASE,
@@ -346,7 +358,7 @@ def list_computers(cfg, db, selected='', query='', nested=True):
         try: enabled = not bool(int(scalar(a,'userAccountControl','')) & 2)
         except (ValueError,TypeError): enabled = None
         sam = str(scalar(a,'sAMAccountName'))
-        computers.append({'dn':x['dn'],'name':str(scalar(a,'name',sam.rstrip('$'))),
+        computers.append({'sid':entry_sid(x),'dn':x['dn'],'name':str(scalar(a,'name',sam.rstrip('$'))),
                           'account':sam,'dns_host':str(scalar(a,'dNSHostName')),
                           'os':str(scalar(a,'operatingSystem')),'os_version':str(scalar(a,'operatingSystemVersion')),
                           'description':str(scalar(a,'description')),'enabled':enabled,

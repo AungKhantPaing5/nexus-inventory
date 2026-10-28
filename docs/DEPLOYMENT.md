@@ -40,6 +40,8 @@ Permissions are checked by the API on every request. Account edits revoke that u
 
 ## GPO collector rollout
 
+For central deployment without touching each PC, use the new [Automatic rollout](AUTOMATIC_ROLLOUT.md) bundle and one computer GPO. The following is the optional manual enrollment path.
+
 Pilot one Windows 11, one Windows 7, one Server 2008 and one Server 2019 machine first.
 
 1. In Nexus, Enroll device with its exact computer name; save that computer's unique token. A token cannot submit records for another name. Re-enrollment invalidates the old token. Revoke a token when decommissioning a computer.

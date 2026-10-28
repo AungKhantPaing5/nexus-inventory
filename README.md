@@ -38,6 +38,14 @@ In **Active Directory → Users**, open **User & devices** to see machines whose
 
 See [AD setup guide](docs/ACTIVE_DIRECTORY.md#computers-and-observed-user-devices) for limits and deployment steps.
 
+## One-time AD/GPO automatic rollout
+
+Use **Automatic rollout** as a Nexus administrator to prepare all eligible AD computers in an OU/Base DN at once. Download the protected ZIP, run its staging installer on the named Windows AD/file server, then create one SYSTEM computer GPO task. Each PC retrieves its own token/config using its domain machine identity, trusts the pinned Nexus CA and runs the collector automatically. No manual client enrollment or shared token is required.
+
+The installer creates administrator-controlled public assets and per-computer-SID protected private config shares. Existing and revoked tokens are not rotated/reactivated. Encrypted bundle history supports reliable re-download. New AD computers added later need another central bundle; there is no unattended directory reconciliation in this release.
+
+See [Automatic rollout guide](docs/AUTOMATIC_ROLLOUT.md) for installation, the single GPO task, scope, access controls and validation limits.
+
 ## Tests
 
 ```sh

@@ -1,5 +1,6 @@
 """Nexus LAN inventory WSGI application; authenticated WSGI service with read-only AD browsing."""
 import directory
+import deployment
 import csv, hashlib, hmac, io, json, os, re, secrets, sqlite3, time
 from pathlib import Path
 from contextlib import contextmanager
@@ -42,6 +43,7 @@ def initialize():
         CREATE TABLE IF NOT EXISTS devices(name TEXT PRIMARY KEY COLLATE NOCASE,payload TEXT,received REAL,source TEXT);
         CREATE TABLE IF NOT EXISTS agents(id INTEGER PRIMARY KEY,name TEXT UNIQUE COLLATE NOCASE,token TEXT,active INTEGER DEFAULT 1);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,at REAL,actor TEXT,action TEXT,target TEXT);
+        CREATE TABLE IF NOT EXISTS deployment_batches(id TEXT PRIMARY KEY,created REAL,actor TEXT,count INTEGER,payload BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS directory_settings(id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS attempts(key TEXT PRIMARY KEY,count INTEGER,started REAL);
         ''')
@@ -154,6 +156,16 @@ def application(env, start_response):
                         pw=str(data.get('password',''))
                         if not 12<=len(pw)<=1024: raise Fail(400,'Password must have 12–1024 characters')
                         c.execute('UPDATE users SET password=? WHERE id=?',(password_hash(pw),u['id'])); c.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],));log(c,u['email'],'password.changed');body={'ok':True}
+                    elif path=='/api/deployment/batches' and method=='GET':
+                        admin(); body=[dict(r) for r in c.execute('SELECT id,created,actor,count FROM deployment_batches ORDER BY created DESC LIMIT 30')]
+                    elif path=='/api/deployment/prepare' and method=='POST':
+                        admin(); body=deployment.prepare(c,DB,ROOT,ORIGIN,data,u['email']);log(c,u['email'],'deployment.prepared',body['id'])
+                    elif path=='/api/deployment/download' and method=='POST':
+                        admin()
+                        if not isinstance(data,dict):raise Fail(400,'Invalid download request')
+                        body=deployment.download(c,DB,data.get('id',''));content_type='application/zip'
+                        headers.append(('Content-Disposition','attachment; filename="nexus-domain-rollout.zip"'))
+                        log(c,u['email'],'deployment.downloaded',data['id'])
                     elif path=='/api/ad/settings' and method=='GET':
                         admin(); body=directory.public_settings(c)
                     elif path=='/api/ad/settings' and method=='POST':

@@ -1,0 +1,5 @@
+{$SITE_HOST} {
+    tls internal
+    encode gzip
+    reverse_proxy nexus:8080
+}

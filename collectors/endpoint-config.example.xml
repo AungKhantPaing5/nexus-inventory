@@ -1,0 +1,4 @@
+<Nexus>
+  <ServerUrl>https://inventory.kmd.local</ServerUrl>
+  <Token>REPLACE_WITH_THIS_COMPUTERS_UNIQUE_TOKEN</Token>
+</Nexus>

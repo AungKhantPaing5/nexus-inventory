@@ -1,0 +1,80 @@
+import io, json, os, tempfile, unittest
+import app
+
+class ApiTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp=tempfile.TemporaryDirectory();app.DB=cls.tmp.name+'/test.db';app.ORIGIN='https://inventory.test'
+        os.environ['ADMIN_PASSWORD']='test-only-password-1234';app.initialize()
+    @classmethod
+    def tearDownClass(cls):cls.tmp.cleanup()
+    def call(self,path,data=None,cookie='',csrf='',bearer='',origin=True):
+        env={'REQUEST_METHOD':'POST' if data is not None else 'GET','PATH_INFO':'/api/'+path,'wsgi.input':io.BytesIO(),'HTTP_COOKIE':cookie}
+        if data is not None:
+            raw=json.dumps(data).encode();env.update({'CONTENT_LENGTH':str(len(raw)),'CONTENT_TYPE':'application/json','wsgi.input':io.BytesIO(raw),'HTTP_X_CSRF_TOKEN':csrf})
+        if origin:env['HTTP_ORIGIN']=app.ORIGIN
+        if bearer:env['HTTP_AUTHORIZATION']='Bearer '+bearer
+        result={}
+        def start(status,headers):result.update(status=int(status.split()[0]),headers=dict(headers))
+        result['raw']=b''.join(app.application(env,start))
+        try:result['body']=json.loads(result['raw'])
+        except ValueError:result['body']=None
+        return result
+    def login(self,email='itsupport@kmdcomputer.com',password='test-only-password-1234'):
+        r=self.call('login',{'email':email,'password':password});self.assertEqual(r['status'],200,r)
+        return r['headers']['Set-Cookie'].split(';')[0],r['body']['csrf']
+    def test_anonymous_and_csrf(self):
+        self.assertEqual(self.call('devices')['status'],401)
+        cookie,csrf=self.login()
+        self.assertEqual(self.call('import',[],cookie= cookie)['status'],403)
+        self.assertEqual(self.call('import',[],cookie=cookie,csrf=csrf,origin=False)['status'],403)
+        self.assertEqual(self.call('login',{'email':'x','password':'x'},origin=False)['status'],403)
+    def test_permissions_and_persistence(self):
+        cookie,csrf=self.login()
+        r=self.call('users',{'email':'viewer@example.com','password':'viewer-test-password','permissions':['inventory.read']},cookie,csrf)
+        self.assertEqual(r['status'],200,r)
+        vc,vs=self.login('viewer@example.com','viewer-test-password')
+        self.assertEqual(self.call('users',cookie=vc)['status'],403)
+        self.assertEqual(self.call('import',{'name':'PC-VIEW','apps':[]},vc,vs)['status'],403)
+        self.assertEqual(self.call('agents',{'name':'PC-VIEW'},vc,vs)['status'],403)
+        self.assertEqual(self.call('export',cookie=vc)['status'],403)
+        self.assertEqual(self.call('rdp',{'name':'PC-VIEW'},vc,vs)['status'],403)
+        self.assertEqual(self.call('devices',cookie=vc)['status'],200)
+        self.assertEqual(self.call('import',{'name':'REAL-PC','apps':[{'name':'Office'}],'ram':16},cookie,csrf)['status'],200)
+        app.initialize()
+        records=self.call('devices',cookie=cookie)['body'];self.assertTrue(any(d['name']=='REAL-PC' and d['status']=='Snapshot' for d in records))
+    def test_scoped_agent_token(self):
+        cookie,csrf=self.login();token=self.call('agents',{'name':'AGENT-01'},cookie,csrf)['body']['token']
+        self.assertEqual(self.call('checkin',{'name':'AGENT-02','apps':[]},bearer=token)['status'],403)
+        self.assertEqual(self.call('checkin',{'name':'AGENT-01','apps':[]},bearer=token)['status'],200)
+        records=self.call('devices',cookie=cookie)['body'];self.assertTrue(any(d['name']=='AGENT-01' and d['status']=='Recent' for d in records))
+        self.assertEqual(self.call('agents',{'name':'AGENT-01','revoke':True},cookie,csrf)['status'],200)
+        self.assertEqual(self.call('checkin',{'name':'AGENT-01','apps':[]},bearer=token)['status'],401)
+    def test_admin_protection_and_audit(self):
+        cookie,csrf=self.login();u=self.call('me',cookie=cookie)['body']['user']
+        r=self.call('users',{'id':u['id'],'email':u['email'],'admin':False,'active':False,'permissions':[]},cookie,csrf)
+        self.assertEqual(r['status'],400)
+        rows=self.call('audit',cookie=cookie)['body'];self.assertGreater(len(rows),0)
+    def test_validation_and_rdp(self):
+        cookie,csrf=self.login()
+        for d in [{'name':'bad\r\nname','apps':[]},{'name':'PC','apps':'invalid'},{'name':'PC','ram':float('nan'),'apps':[]}]:
+            self.assertEqual(self.call('import',d,cookie,csrf)['status'],400)
+        self.call('import',{'name':'RDP-PC','apps':[]},cookie,csrf)
+        r=self.call('rdp',{'name':'RDP-PC'},cookie,csrf);self.assertEqual(r['status'],200);self.assertIn('authentication level:i:2',r['body']['content'])
+        self.assertEqual(self.call('rdp',{'name':'bad\naddress'},cookie,csrf)['status'],404)
+    def test_session_revocation(self):
+        cookie,csrf=self.login()
+        self.call('users',{'email':'revoke@example.com','password':'revoke-test-password','permissions':['inventory.read']},cookie,csrf)
+        vc,vs=self.login('revoke@example.com','revoke-test-password')
+        user=next(x for x in self.call('users',cookie=cookie)['body'] if x['email']=='revoke@example.com')
+        self.assertEqual(self.call('users',{**user,'active':False},cookie,csrf)['status'],200)
+        self.assertEqual(self.call('me',cookie=vc)['status'],401)
+    def test_password_hash_and_token_storage(self):
+        with app.connect() as c:
+            u=c.execute('SELECT password FROM users LIMIT 1').fetchone()[0]
+        self.assertNotEqual(u,os.environ['ADMIN_PASSWORD']);self.assertTrue(app.password_ok(os.environ['ADMIN_PASSWORD'],u))
+    def test_rate_limit(self):
+        for i in range(10):self.assertEqual(self.call('login',{'email':'blocked@example.com','password':'wrong'})['status'],401)
+        self.assertEqual(self.call('login',{'email':'blocked@example.com','password':'wrong'})['status'],429)
+
+if __name__=='__main__':unittest.main()

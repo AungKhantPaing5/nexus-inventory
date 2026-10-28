@@ -1,0 +1,40 @@
+services:
+  nexus:
+    build: .
+    restart: unless-stopped
+    environment:
+      APP_ORIGIN: ${APP_ORIGIN:?Run python3 setup.py first}
+      ADMIN_EMAIL: itsupport@kmdcomputer.com
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+    secrets:
+      - admin_password
+    volumes:
+      - nexus_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+  gateway:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${BIND_IP:-127.0.0.1}:443:443"
+    environment:
+      SITE_HOST: ${SITE_HOST:?Run python3 setup.py first}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      nexus:
+        condition: service_healthy
+secrets:
+  admin_password:
+    file: ./secrets/admin_password.txt
+volumes:
+  nexus_data:
+  caddy_data:
+  caddy_config:

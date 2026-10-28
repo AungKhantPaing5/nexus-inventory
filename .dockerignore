@@ -1,0 +1,7 @@
+.git
+.env
+secrets
+__pycache__
+tests
+*.db
+*.db-*

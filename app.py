@@ -1,4 +1,5 @@
-"""Nexus LAN inventory WSGI application; Python standard library business layer."""
+"""Nexus LAN inventory WSGI application; authenticated WSGI service with read-only AD browsing."""
+import directory
 import csv, hashlib, hmac, io, json, os, re, secrets, sqlite3, time
 from pathlib import Path
 from contextlib import contextmanager
@@ -8,7 +9,7 @@ from urllib.parse import parse_qs
 ROOT = Path(__file__).resolve().parent
 DB = os.getenv('DATABASE_PATH', '/data/nexus.db')
 ORIGIN = os.getenv('APP_ORIGIN', 'https://localhost')
-PERMS = ['inventory.read','inventory.import','inventory.export','remote.rdp','audit.read','agents.manage']
+PERMS = ['inventory.read','inventory.import','inventory.export','remote.rdp','audit.read','agents.manage','directory.read']
 NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$')
 
 @contextmanager
@@ -41,6 +42,7 @@ def initialize():
         CREATE TABLE IF NOT EXISTS devices(name TEXT PRIMARY KEY COLLATE NOCASE,payload TEXT,received REAL,source TEXT);
         CREATE TABLE IF NOT EXISTS agents(id INTEGER PRIMARY KEY,name TEXT UNIQUE COLLATE NOCASE,token TEXT,active INTEGER DEFAULT 1);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,at REAL,actor TEXT,action TEXT,target TEXT);
+        CREATE TABLE IF NOT EXISTS directory_settings(id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS attempts(key TEXT PRIMARY KEY,count INTEGER,started REAL);
         ''')
         if not c.execute('SELECT 1 FROM users LIMIT 1').fetchone():
@@ -138,6 +140,26 @@ def application(env, start_response):
                         pw=str(data.get('password',''))
                         if not 12<=len(pw)<=1024: raise Fail(400,'Password must have 12–1024 characters')
                         c.execute('UPDATE users SET password=? WHERE id=?',(password_hash(pw),u['id'])); c.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],));log(c,u['email'],'password.changed');body={'ok':True}
+                    elif path=='/api/ad/settings' and method=='GET':
+                        admin(); body=directory.public_settings(c)
+                    elif path=='/api/ad/settings' and method=='POST':
+                        admin(); body=directory.save_settings(c, DB, data); log(c,u['email'],'ad.settings.updated')
+                    elif path=='/api/ad/test' and method=='POST':
+                        admin()
+                        try:
+                            body=directory.test_connection(directory.load_settings(c),DB)
+                        except directory.DirectoryError:
+                            log(c,u['email'],'ad.connection.failed'); c.commit(); raise
+                        log(c,u['email'],'ad.connection.tested')
+                    elif path=='/api/ad/ous' and method=='GET':
+                        require('directory.read'); body=directory.list_ous(directory.load_settings(c),DB)
+                        log(c,u['email'],'ad.ous.read',len(body['ous']))
+                    elif path=='/api/ad/users' and method=='GET':
+                        require('directory.read'); args=parse_qs(env.get('QUERY_STRING',''),keep_blank_values=True)
+                        nested=args.get('nested',['1'])[0]
+                        if nested not in ['0','1']: raise Fail(400,'nested must be 0 or 1')
+                        body=directory.list_users(directory.load_settings(c),DB,args.get('ou',[''])[0],args.get('q',[''])[0],nested=='1')
+                        log(c,u['email'],'ad.users.read',body['count'])
                     elif path=='/api/devices' and method=='GET':
                         require('inventory.read'); result=[]
                         for r in c.execute('SELECT * FROM devices ORDER BY name'):
@@ -189,6 +211,7 @@ def application(env, start_response):
                     elif path in ['/collectors/collector.ps1','/collectors/collector-legacy.ps1'] and method=='GET':
                         require('agents.manage');body=(ROOT/path.lstrip('/')).read_bytes();content_type='text/plain';headers.append(('Content-Disposition','attachment; filename="'+Path(path).name+'"'))
                     else: raise Fail(404,'Not found')
+    except directory.DirectoryError as ex: status=ex.status;body={'error':str(ex)}
     except Fail as ex: status=ex.status;body={'error':ex.message}
     except sqlite3.IntegrityError: status=409;body={'error':'Email already exists'}
     except Exception:

@@ -2,7 +2,7 @@
 
 ## Layout
 
-Run the Docker stack on a supported Linux VM (Ubuntu 24.04 LTS is a suitable deployment target), separate from the 2012 R2 domain controller. The collector runs locally on endpoints and sends an outbound HTTPS request. The app itself does not join AD, perform LDAP login, query AD OUs, or need a domain administrator account. AD/GPO is used to distribute an approved scheduled task.
+Run the Docker stack on a supported Linux VM (Ubuntu 24.04 LTS is a suitable deployment target), separate from the 2012 R2 domain controller. The collector runs locally on endpoints and sends an outbound HTTPS request. The app can browse AD OUs/users over verified LDAPS or StartTLS using a read-only service account. It does not join AD or provide AD login/SSO. AD/GPO also distributes an approved collector task. See [AD setup](ACTIVE_DIRECTORY.md).
 
 Only TCP 443 to the inventory VM is required for inventory check-ins. RDP runs directly from the administrator's workstation to an endpoint over the office LAN/VPN; opening 3389 publicly is not required. This release does not provide interactive browser screen control, command execution, remote restart or shutdown.
 
@@ -33,6 +33,7 @@ Only TCP 443 to the inventory VM is required for inventory check-ins. RDP runs d
 | inventory.export | CSV export; also requires inventory.read |
 | remote.rdp | Generate audited RDP connection files; also requires inventory.read |
 | audit.read | Latest 500 audit events |
+| directory.read | Read AD organizational units and user details; AD connection settings remain admin-only |
 | agents.manage | Enroll/rotate/revoke endpoint tokens and download collectors |
 
 Permissions are checked by the API on every request. Account edits revoke that user's active sessions. At least one active administrator must remain. Password changes invalidate all that user's sessions. Login is account-rate-limited to ten failures per 15-minute window. Sessions expire after eight hours. SQLite contains salted PBKDF2 password hashes and SHA-256 token hashes, not reusable passwords or bearer tokens.
@@ -64,7 +65,7 @@ No check-in for 20 minutes yields Stale. A manual import is Snapshot. These labe
 | Server 2008 / 2008 R2 | Legacy script | PowerShell 2.0 and appropriate .NET must be installed; use offline JSON if modern TLS is unavailable |
 | Server 2012 R2 / 2019 | Standard collector | Windows PowerShell, WMI access and trusted CA |
 
-Scripts target **Windows PowerShell**, not PowerShell 7. These versions are design targets; no physical Windows/AD test environment was available during development. WMI and firmware may not expose DDR generation or disk media type. Such values stay Unknown rather than being inferred from capacity or model. Get-PhysicalDisk is used only when available; older WMI paths usually report disk type as unknown. Registry inventory covers machine-wide software and the collector account's HKCU; SYSTEM cannot enumerate all users' private installed apps or Store apps. Domain membership/current interactive user are read from WMI; no AD sync or SSO is implemented. Multi-session RDS user attribution may be incomplete.
+Scripts target **Windows PowerShell**, not PowerShell 7. These versions are design targets; no physical Windows/AD test environment was available during development. WMI and firmware may not expose DDR generation or disk media type. Such values stay Unknown rather than being inferred from capacity or model. Get-PhysicalDisk is used only when available; older WMI paths usually report disk type as unknown. Registry inventory covers machine-wide software and the collector account's HKCU; SYSTEM cannot enumerate all users' private installed apps or Store apps. Domain membership/current interactive user are read from WMI; the separate Active Directory browser reads OUs/users on demand. AD SSO is not implemented. Multi-session RDS user attribution may be incomplete.
 
 The legacy Windows versions are outside this app's control: assess their patch/TLS state before enabling automatic check-ins. No Windows credentials are stored by Nexus. RDP host support depends on edition and endpoint configuration.
 
@@ -77,6 +78,6 @@ docker compose exec -T nexus python -c "import sqlite3; s=sqlite3.connect('/data
 docker compose cp nexus:/tmp/nexus-backup.db ./nexus-backup.db
 ```
 
-The backup contains inventory, user password hashes and audit records: store it encrypted under restricted access. Back up Caddy data securely too; it includes the CA private key. Do not publish backups.
+The backup contains inventory, user password hashes and audit records: store it encrypted under restricted access. Back up `/data/nexus.ad.key` separately with restricted access as well: it decrypts the saved AD bind credential. The SQLite backup alone cannot restore that credential without this key. Back up Caddy data securely too; it includes the CA private key. Do not publish backups.
 
 For restore, stop the application and use a controlled admin maintenance container to replace `/data/nexus.db` in the named volume, preserving owner uid 10001. Remove stale WAL/SHM only after shutdown, then restart. Test restoration on a separate stack before relying on backups. Upgrade with `docker compose up -d --build`; current schema initialization is additive but future migrations must be reviewed.

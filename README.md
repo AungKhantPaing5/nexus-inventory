@@ -22,12 +22,19 @@ Use `itsupport@kmdcomputer.com` and enter your initial password in the **local s
 - Persistent audit log for administrative actions and RDP downloads.
 - RDP file download launches the administrator's existing RDP client; **no browser remote-control gateway is included**.
 
-AD 2012 R2 can distribute the task via GPO; the application does not yet implement LDAP/AD sign-in or OU discovery. Win7–11 and Server 2008–2019 are collector design targets with prerequisites, not a claim of completed OS testing. See the compatibility table and data limitations in the deployment guide.
+AD 2012 R2 can distribute the task via GPO; the application can browse OUs/users over verified LDAPS or StartTLS. AD sign-in/SSO is not implemented. Win7–11 and Server 2008–2019 are collector design targets with prerequisites, not a claim of completed OS testing. See the compatibility table and data limitations in the deployment guide.
+
+## Active Directory OU browser
+
+Open **Active Directory → AD settings** as an administrator, enter your DC DNS hostname, Base DN and read-only bind account, paste its CA certificate, then **Save settings → Test saved connection**. Browse OUs, include/exclude sub-OUs, search users and inspect enabled/disabled status, department and direct groups. Grant `directory.read` to allow other Nexus accounts to view directory users. Bind passwords are encrypted, never returned by the settings API.
+
+See [AD setup guide](docs/ACTIVE_DIRECTORY.md) for Windows Server 2012 R2 prerequisites, permissions, secure configuration and upgrade steps.
 
 ## Tests
 
 ```sh
+python3 -m pip install -r requirements.txt
 python3 -m unittest discover -s tests -v
 ```
 
-The tests exercise the real WSGI API and SQLite database using an isolated temporary database: login/CSRF, permission enforcement, persistence, scoped device check-ins, revocation, last-admin protection and session invalidation. No Windows, Docker daemon or AD integration is simulated as a successful real-world deployment.
+The tests exercise the real WSGI API and SQLite database using an isolated temporary database: login/CSRF, permission enforcement, persistence, scoped device check-ins, revocation, last-admin protection session invalidation, encrypted AD configuration, read-only AD transport and OU/user browsing against LDAP fixtures. No Windows, Docker daemon or AD integration is simulated as a successful real-world deployment.

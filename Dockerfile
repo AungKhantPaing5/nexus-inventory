@@ -3,7 +3,7 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 DATABASE_PATH=/data/nexus.db
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && useradd --uid 10001 --create-home nexus && mkdir /data && chown nexus:nexus /data
-COPY --chown=nexus:nexus app.py wsgi.py ./
+COPY --chown=nexus:nexus app.py directory.py wsgi.py ./
 COPY --chown=nexus:nexus static ./static
 COPY --chown=nexus:nexus collectors ./collectors
 USER nexus

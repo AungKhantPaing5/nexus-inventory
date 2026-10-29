@@ -5,3 +5,5 @@ html[data-theme="light"] body{background:#fff;color:#111}html[data-theme="light"
 @media(prefers-reduced-motion:reduce){button,.nav{transition:none}.nav:hover,.nav.active{transform:none}}
 @media(max-width:700px){header{height:auto;min-height:84px;gap:12px;flex-wrap:wrap;padding:12px 0}.toolbar select,.toolbar input{max-width:100%;width:100%}}
 html[data-theme="light"] .modal input:not([type=checkbox]),html[data-theme="light"] .modal select,html[data-theme="light"] .modal textarea{background:#fff;color:#111;border-color:#cbd4de}html[data-theme="light"] .modal pre{background:#f3f6f9;color:#111}.ad-toolbar #adUsersTab.primary,.ad-toolbar #adComputersTab.primary,.ad-ous button.selected{box-shadow:var(--shadow);transform:translateY(-3px)}
+
+.sort-button{border:0!important;background:transparent!important;color:inherit!important;padding:4px 0;font-size:inherit;font-weight:600;letter-spacing:inherit;text-align:left;white-space:nowrap}.sort-arrow{color:var(--green)}th:has(.sort-button){cursor:pointer}.toolbar #status{width:200px;max-width:250px}

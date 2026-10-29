@@ -1,6 +1,7 @@
 """Nexus LAN inventory WSGI application; authenticated WSGI service with read-only AD browsing."""
 import directory
 import deployment
+import reporting
 import csv, hashlib, hmac, io, json, os, re, secrets, sqlite3, time
 from pathlib import Path
 from contextlib import contextmanager
@@ -213,6 +214,11 @@ def application(env, start_response):
                         if nested not in ['0','1']: raise Fail(400,'nested must be 0 or 1')
                         body=directory.list_users(directory.load_settings(c),DB,args.get('ou',[''])[0],args.get('q',[''])[0],nested=='1')
                         log(c,u['email'],'ad.users.read',body['count'])
+                    elif path=='/api/ad/inventory-users' and method=='GET':
+                        require('directory.read'); require('inventory.read')
+                        result=directory.list_users(directory.load_settings(c),DB)
+                        if result['truncated']: raise Fail(409,'AD user query incomplete; user counts unavailable')
+                        body=reporting.user_counts(result['users'],[inventory_record(r) for r in c.execute('SELECT * FROM devices')])
                     elif path=='/api/ad/ou-devices' and method=='GET':
                         require('directory.read'); require('inventory.read')
                         args=parse_qs(env.get('QUERY_STRING',''),keep_blank_values=True)
@@ -263,6 +269,16 @@ def application(env, start_response):
                         require('inventory.import'); records=valid_records(data)
                         for d in records: c.execute('INSERT INTO devices VALUES(?,?,?,?) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload,received=excluded.received,source=excluded.source',(d['name'],json.dumps(d),now,'import'))
                         log(c,u['email'],'inventory.import',len(records));body={'count':len(records)}
+                    elif path=='/api/export-xlsx' and method=='POST':
+                        require('inventory.export'); require('inventory.read')
+                        names=data.get('names')
+                        if not isinstance(names,list) or len(names)>10000 or any(not isinstance(n,str) or not NAME.fullmatch(n) for n in names): raise Fail(400,'Invalid device selection')
+                        by_name={r['name'].casefold():inventory_record(r) for r in c.execute('SELECT * FROM devices')}
+                        if len({n.casefold() for n in names})!=len(names) or any(n.casefold() not in by_name for n in names): raise Fail(400,'Unknown or duplicate device')
+                        body=reporting.workbook([by_name[n.casefold()] for n in names],str(data.get('scope','All user OUs'))[:200])
+                        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                        headers.append(('Content-Disposition','attachment; filename="NSD-AD-Client-Inventory.xlsx"'))
+                        log(c,u['email'],'inventory.export.xlsx',len(names))
                     elif path=='/api/export' and method=='GET':
                         require('inventory.export');require('inventory.read'); out=io.StringIO();w=csv.writer(out);fields=['name','domain','user','cpu','ram','ddr','storage','boot','uptime','collectedAt','os'];w.writerow(fields)
                         for r in c.execute('SELECT payload FROM devices ORDER BY name'):

@@ -123,6 +123,22 @@ class ApiTest(unittest.TestCase):
         vc,vs=self.login('ou-viewer@example.com','123456')
         self.assertEqual(self.call('ad/ou-devices',cookie=vc)['status'],403)
 
+    def test_excel_export_selection_and_permissions(self):
+        import zipfile
+        cookie,csrf=self.login()
+        self.call('import',[{'name':'XLS-PC2','apps':[]},{'name':'XLS-PC1','apps':[]}],cookie,csrf)
+        data={'names':['XLS-PC2','XLS-PC1'],'scope':'HR'}
+        self.assertEqual(self.call('export-xlsx',data,cookie=cookie)['status'],403)
+        r=self.call('export-xlsx',data,cookie,csrf)
+        self.assertEqual(r['status'],200,r)
+        with zipfile.ZipFile(io.BytesIO(r['raw'])) as z:
+            xml=z.read('xl/worksheets/sheet1.xml').decode()
+            self.assertLess(xml.index('XLS-PC2'),xml.index('XLS-PC1'))
+        self.assertEqual(self.call('export-xlsx',{'names':['UNKNOWN-XLS']},cookie,csrf)['status'],400)
+        self.call('users',{'email':'xlsx-viewer@example.com','password':'123456','permissions':['inventory.read']},cookie,csrf)
+        vc,vs=self.login('xlsx-viewer@example.com','123456')
+        self.assertEqual(self.call('export-xlsx',data,vc,vs)['status'],403)
+
     def test_rate_limit(self):
         for i in range(10):self.assertEqual(self.call('login',{'email':'blocked@example.com','password':'wrong'})['status'],401)
         self.assertEqual(self.call('login',{'email':'blocked@example.com','password':'wrong'})['status'],429)

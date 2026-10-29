@@ -232,13 +232,14 @@ def list_users(cfg, db, selected='', query='', nested=True):
         f += f'(|(displayName=*{q}*)(sAMAccountName=*{q}*)(userPrincipalName=*{q}*)(mail=*{q}*))'
     f += ')'
     fields = ['displayName','sAMAccountName','userPrincipalName','mail','department','title',
-              'telephoneNumber','userAccountControl','lastLogonTimestamp','description','memberOf']
+              'telephoneNumber','userAccountControl','lastLogonTimestamp','description','memberOf','objectSid']
     with open_directory(cfg, db) as conn:
         if dn_parts(selected) != dn_parts(cfg['base_dn']):
             conn.search(selected, '(objectClass=organizationalUnit)', search_scope=ldap3.BASE, attributes=['ou'], time_limit=5)
             if conn.result.get('result', 0) != 0 or not any(x.get('type') == 'searchResEntry' for x in conn.response):
                 raise DirectoryError('Selected OU no longer exists or is not readable.', 404)
         entries, truncated = search_entries(conn, selected, f, fields, ldap3.SUBTREE if nested else ldap3.LEVEL)
+        identity = domain_identity(conn, selected)
     users = []
     for x in entries:
         a = x['attributes']
@@ -246,7 +247,7 @@ def list_users(cfg, db, selected='', query='', nested=True):
         except (ValueError,TypeError): enabled = None
         groups = a.get('memberOf', [])
         if not isinstance(groups, list): groups = [groups]
-        users.append({'dn': x['dn'], 'name': str(scalar(a,'displayName',scalar(a,'sAMAccountName'))),
+        users.append({'sid':entry_sid(x), 'domain':identity, 'dn': x['dn'], 'name': str(scalar(a,'displayName',scalar(a,'sAMAccountName'))),
                       'username': str(scalar(a,'sAMAccountName')), 'upn': str(scalar(a,'userPrincipalName')),
                       'email': str(scalar(a,'mail')), 'department': str(scalar(a,'department')),
                       'title': str(scalar(a,'title')), 'phone': str(scalar(a,'telephoneNumber')),

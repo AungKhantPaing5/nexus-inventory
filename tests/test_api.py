@@ -98,6 +98,31 @@ class ApiTest(unittest.TestCase):
         vc,vs=self.login('power-viewer@example.com','viewer-test-password')
         self.assertEqual(self.call('power',request,vc,vs)['status'],403)
 
+    def test_six_character_passwords(self):
+        cookie,csrf=self.login()
+        base={'email':'six@example.com','permissions':['inventory.read']}
+        self.assertEqual(self.call('users',{**base,'password':'12345'},cookie,csrf)['status'],400)
+        self.assertEqual(self.call('users',{**base,'password':'123456'},cookie,csrf)['status'],200)
+        vc,vs=self.login('six@example.com','123456')
+        self.assertEqual(self.call('password',{'current':'123456','password':'abcde'},vc,vs)['status'],400)
+        self.assertEqual(self.call('password',{'current':'123456','password':'abcdef'},vc,vs)['status'],200)
+        self.login('six@example.com','abcdef')
+
+    def test_user_ou_device_filter(self):
+        from unittest.mock import patch
+        cookie,csrf=self.login()
+        self.call('import',[{'name':'OU-MATCH','userSid':'S-1-5-21-1-2-3-1000','apps':[]}, {'name':'OU-OTHER','userSid':'S-1-5-21-1-2-3-1001','apps':[]}],cookie,csrf)
+        result={'users':[{'sid':'S-1-5-21-1-2-3-1000'}],'truncated':False,'ou':'OU=HR,DC=kmd,DC=com'}
+        with patch('app.directory.load_settings',return_value={}), patch('app.directory.list_users',return_value=result):
+            r=self.call('ad/ou-devices',cookie=cookie)
+            self.assertEqual(r['status'],200,r)
+            self.assertEqual(r['body']['names'],['OU-MATCH'])
+            result['truncated']=True
+            self.assertEqual(self.call('ad/ou-devices',cookie=cookie)['status'],409)
+        self.call('users',{'email':'ou-viewer@example.com','password':'123456','permissions':['inventory.read']},cookie,csrf)
+        vc,vs=self.login('ou-viewer@example.com','123456')
+        self.assertEqual(self.call('ad/ou-devices',cookie=vc)['status'],403)
+
     def test_rate_limit(self):
         for i in range(10):self.assertEqual(self.call('login',{'email':'blocked@example.com','password':'wrong'})['status'],401)
         self.assertEqual(self.call('login',{'email':'blocked@example.com','password':'wrong'})['status'],429)

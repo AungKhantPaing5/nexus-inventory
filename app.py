@@ -110,9 +110,9 @@ def application(env, start_response):
         method=env['REQUEST_METHOD']; path=env.get('PATH_INFO','/'); now=time.time()
         if method not in ['GET','POST']: raise Fail(405,'Method not allowed')
         if path=='/health': body={'ok':True}
-        elif method=='GET' and path in ['/','/app.js','/login.html']:
-            p=ROOT/'static'/({'/':'index.html','/app.js':'app.js','/login.html':'login.html'}[path])
-            content_type='application/javascript' if p.suffix=='.js' else 'text/html; charset=utf-8'; body=p.read_bytes()
+        elif method=='GET' and path in ['/','/app.js','/login.html','/theme.css','/theme.js']:
+            p=ROOT/'static'/({'/':'index.html','/app.js':'app.js','/login.html':'login.html','/theme.css':'theme.css','/theme.js':'theme.js'}[path])
+            content_type={'.js':'application/javascript','.css':'text/css; charset=utf-8'}.get(p.suffix,'text/html; charset=utf-8'); body=p.read_bytes()
         else:
             with connect() as c:
                 length=int(env.get('CONTENT_LENGTH') or 0)
@@ -172,7 +172,7 @@ def application(env, start_response):
                     elif path=='/api/password' and method=='POST':
                         if not password_ok(str(data.get('current','')),u['password']): raise Fail(403,'Current password incorrect')
                         pw=str(data.get('password',''))
-                        if not 12<=len(pw)<=1024: raise Fail(400,'Password must have 12–1024 characters')
+                        if not 6<=len(pw)<=1024: raise Fail(400,'Password must have 6–1024 characters')
                         c.execute('UPDATE users SET password=? WHERE id=?',(password_hash(pw),u['id'])); c.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],));log(c,u['email'],'password.changed');body={'ok':True}
                     elif path=='/api/deployment/batches' and method=='GET':
                         admin(); body=[dict(r) for r in c.execute('SELECT id,created,actor,count FROM deployment_batches ORDER BY created DESC LIMIT 30')]
@@ -213,6 +213,17 @@ def application(env, start_response):
                         if nested not in ['0','1']: raise Fail(400,'nested must be 0 or 1')
                         body=directory.list_users(directory.load_settings(c),DB,args.get('ou',[''])[0],args.get('q',[''])[0],nested=='1')
                         log(c,u['email'],'ad.users.read',body['count'])
+                    elif path=='/api/ad/ou-devices' and method=='GET':
+                        require('directory.read'); require('inventory.read')
+                        args=parse_qs(env.get('QUERY_STRING',''),keep_blank_values=True)
+                        result=directory.list_users(directory.load_settings(c),DB,args.get('ou',[''])[0],nested=True)
+                        if result['truncated']: raise Fail(409,'OU user query incomplete. Select a smaller OU.')
+                        matched=[]
+                        for row in c.execute('SELECT * FROM devices'):
+                            device=inventory_record(row)
+                            if any(directory.match_user_device(user,device) for user in result['users']): matched.append(device['name'])
+                        body={'names':matched,'ou':result['ou'],'basis':'Latest observed console user in selected OU and sub-OUs'}
+                        log(c,u['email'],'ad.ou-devices.read',result['ou'])
                     elif path=='/api/ad/computers' and method=='GET':
                         require('directory.read'); args=parse_qs(env.get('QUERY_STRING',''),keep_blank_values=True)
                         nested=args.get('nested',['1'])[0]
@@ -291,7 +302,7 @@ def application(env, start_response):
                         admin();email=str(data.get('email','')).lower().strip();perms=data.get('permissions',[]);uid=data.get('id');is_admin=bool(data.get('admin',False));active=bool(data.get('active',True));pw=str(data.get('password',''))
                         if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email) or len(email)>254: raise Fail(400,'Invalid email')
                         if not isinstance(perms,list) or any(p not in PERMS for p in perms): raise Fail(400,'Invalid permissions')
-                        if pw and not 12<=len(pw)<=1024: raise Fail(400,'Password must have 12–1024 characters')
+                        if pw and not 6<=len(pw)<=1024: raise Fail(400,'Password must have 6–1024 characters')
                         if uid:
                             old=c.execute('SELECT * FROM users WHERE id=?',(uid,)).fetchone()
                             if not old: raise Fail(404,'User not found')

@@ -73,6 +73,31 @@ class ApiTest(unittest.TestCase):
         with app.connect() as c:
             u=c.execute('SELECT password FROM users LIMIT 1').fetchone()[0]
         self.assertNotEqual(u,os.environ['ADMIN_PASSWORD']);self.assertTrue(app.password_ok(os.environ['ADMIN_PASSWORD'],u))
+    def test_memory_modules_and_power_queue(self):
+        cookie,csrf=self.login()
+        token=self.call('agents',{'name':'POWER-PC'},cookie,csrf)['body']['token']
+        payload={'name':'POWER-PC','type':'Desktop','apps':[],'powerAgent':True,'memoryModules':[{'capacityGB':2,'slot':'DIMM1'},{'capacityGB':2,'slot':'DIMM2'}]}
+        self.assertEqual(self.call('checkin',payload,bearer=token)['status'],200)
+        device=next(d for d in self.call('devices',cookie=cookie)['body'] if d['name']=='POWER-PC')
+        self.assertEqual([m['capacityGB'] for m in device['memoryModules']],[2,2])
+        request={'name':'POWER-PC','action':'restart','confirm':'POWER-PC'}
+        self.assertEqual(self.call('power',request,cookie=cookie)['status'],403)
+        self.assertEqual(self.call('power',{**request,'confirm':'other'},cookie,csrf)['status'],400)
+        self.assertEqual(self.call('power',{**request,'action':'shell'},cookie,csrf)['status'],400)
+        self.assertEqual(self.call('power',request,cookie,csrf)['status'],200)
+        self.assertEqual(self.call('power',request,cookie,csrf)['status'],409)
+        first=self.call('checkin',payload,bearer=token)['body']
+        self.assertEqual(first['command']['action'],'restart')
+        self.assertNotIn('command',self.call('checkin',payload,bearer=token)['body'])
+        self.call('power',request,cookie,csrf)
+        with app.connect() as c:c.execute("UPDATE power_commands SET expires=0 WHERE name='POWER-PC'")
+        self.assertNotIn('command',self.call('checkin',payload,bearer=token)['body'])
+        self.call('checkin',{**payload,'type':'Server'},bearer=token)
+        self.assertEqual(self.call('power',request,cookie,csrf)['status'],403)
+        self.call('users',{'email':'power-viewer@example.com','password':'viewer-test-password','permissions':['inventory.read']},cookie,csrf)
+        vc,vs=self.login('power-viewer@example.com','viewer-test-password')
+        self.assertEqual(self.call('power',request,vc,vs)['status'],403)
+
     def test_rate_limit(self):
         for i in range(10):self.assertEqual(self.call('login',{'email':'blocked@example.com','password':'wrong'})['status'],401)
         self.assertEqual(self.call('login',{'email':'blocked@example.com','password':'wrong'})['status'],429)

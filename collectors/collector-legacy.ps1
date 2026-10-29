@@ -1,6 +1,6 @@
 #requires -version 2.0
 <# Nexus inventory collector. Read-only local WMI + uninstall registry inventory.
-No remote shell, password collection, service installation or certificate bypass.
+Only allowlisted shutdown/restart actions; no remote shell or certificate bypass.
 Without ConfigPath writes an offline JSON snapshot. Use 64-bit Windows PowerShell.
 #>
 param([string]$ConfigPath='', [string]$OutputPath='')
@@ -21,6 +21,12 @@ $ddr=@($memory | ForEach-Object {
  if($t -eq 0){$t=[int]$_.MemoryType}
  if($types.ContainsKey($t)){$types[$t]}else{'Unknown'}
 } | Select-Object -Unique)
+$memoryModules=@($memory | Where-Object { [double]$_.Capacity -gt 0 } | ForEach-Object {
+ $t=[int]$_.SMBIOSMemoryType
+ if($t -eq 0){$t=[int]$_.MemoryType}
+ $kind='Unknown';if($types.ContainsKey($t)){$kind=$types[$t]}
+ @{capacityGB=[math]::Round([double]$_.Capacity/1GB,2);slot=[string]$_.DeviceLocator;ddr=$kind;speed=[string]$_.ConfiguredClockSpeed;manufacturer=[string]$_.Manufacturer;partNumber=([string]$_.PartNumber).Trim()}
+})
 $diskRows=@()
 if(Get-Command Get-PhysicalDisk -ErrorAction SilentlyContinue){
  try {$diskRows=@(Get-PhysicalDisk -ErrorAction Stop | ForEach-Object { '{0} GB {1} - {2}' -f [math]::Round($_.Size/1GB),$_.MediaType,$_.FriendlyName })}catch{}
@@ -46,6 +52,7 @@ if($cs.UserName){
  }catch{}
 }
 $record=@{
+ memoryModules=$memoryModules;powerAgent=([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq "S-1-5-18")
  name=$env:COMPUTERNAME;type=$deviceType;user=[string]$cs.UserName;userSid=$userSid
  cpu=(@($cpu | ForEach-Object {$_.Name}) -join ' / ');ram=[math]::Round($cs.TotalPhysicalMemory/1GB,1);ddr=($ddr -join ' / ')
  storage=($diskRows -join ' + ');uptime=('{0}d {1}h {2}m' -f $uptime.Days,$uptime.Hours,$uptime.Minutes)
@@ -70,5 +77,16 @@ if($ConfigPath -ne ''){
  $client.Headers.Add('Content-Type','application/json; charset=utf-8')
  $client.Headers.Add('Authorization','Bearer '+$token)
  $client.Encoding=[Text.Encoding]::UTF8
- try {$null=$client.UploadString($url.TrimEnd('/')+'/api/checkin','POST',$json);Write-Host 'Check-in accepted.'}finally{$client.Dispose()}
+ try {
+  $response=$serializer.DeserializeObject($client.UploadString($url.TrimEnd('/')+'/api/checkin','POST',$json))
+  Write-Host 'Check-in accepted.'
+  if($record.powerAgent -and $response.ContainsKey('command')){
+   $action=[string]$response['command']['action']
+   $switch=''
+   if($action -eq 'shutdown'){$switch='/s'}elseif($action -eq 'restart'){$switch='/r'}else{throw 'Unsupported power action'}
+   # No /f and zero timeout: do not implicitly force-close unsaved applications.
+   & "$env:SystemRoot\System32\shutdown.exe" $switch /t 0 /d p:4:1 /c 'Nexus administrator requested maintenance'
+   if($LASTEXITCODE -ne 0){throw 'Windows rejected the power request'}
+  }
+ }finally{$client.Dispose()}
 }

@@ -10,7 +10,7 @@ from urllib.parse import parse_qs
 ROOT = Path(__file__).resolve().parent
 DB = os.getenv('DATABASE_PATH', '/data/nexus.db')
 ORIGIN = os.getenv('APP_ORIGIN', 'https://localhost')
-PERMS = ['inventory.read','inventory.import','inventory.export','remote.rdp','audit.read','agents.manage','directory.read']
+PERMS = ['inventory.read','inventory.import','inventory.export','remote.rdp','audit.read','agents.manage','directory.read','remote.power']
 NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$')
 
 @contextmanager
@@ -45,6 +45,7 @@ def initialize():
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,at REAL,actor TEXT,action TEXT,target TEXT);
         CREATE TABLE IF NOT EXISTS deployment_batches(id TEXT PRIMARY KEY,created REAL,actor TEXT,count INTEGER,payload BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS directory_settings(id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS power_commands(id TEXT PRIMARY KEY,name TEXT COLLATE NOCASE,action TEXT,actor TEXT,created REAL,expires REAL,status TEXT);
         CREATE TABLE IF NOT EXISTS attempts(key TEXT PRIMARY KEY,count INTEGER,started REAL);
         ''')
         if not c.execute('SELECT 1 FROM users LIMIT 1').fetchone():
@@ -74,6 +75,16 @@ def valid_records(data):
         try: x['ram']=float(d.get('ram',0))
         except (TypeError,ValueError): raise Fail(400,'Invalid RAM')
         if not __import__('math').isfinite(x['ram']) or not 0 <= x['ram'] <= 1000000: raise Fail(400,'Invalid RAM')
+        modules=d.get('memoryModules',[])
+        if not isinstance(modules,list) or len(modules)>128: raise Fail(400,'Invalid memory modules')
+        x['memoryModules']=[]
+        for m in modules:
+            if not isinstance(m,dict): raise Fail(400,'Invalid memory module')
+            try: capacity=float(m.get('capacityGB',0))
+            except (ValueError,TypeError): raise Fail(400,'Invalid module capacity')
+            if not __import__('math').isfinite(capacity) or not 0<capacity<=1000000: raise Fail(400,'Invalid module capacity')
+            x['memoryModules'].append({'capacityGB':capacity,**{k:str(m.get(k,''))[:200] for k in ['slot','ddr','speed','manufacturer','partNumber']}})
+        x['powerAgent']=d.get('powerAgent') is True
         x['apps']=[{'name':a['name'][:500],'version':str(a.get('version',''))[:100]} for a in apps]
         clean.append(x)
     return clean
@@ -137,6 +148,13 @@ def application(env, start_response):
                     if len(records)!=1 or records[0]['name'].lower()!=agent['name'].lower(): raise Fail(403,'Token is scoped to a different device')
                     d=records[0]; c.execute('INSERT INTO devices VALUES(?,?,?,?) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload,received=excluded.received,source=excluded.source',(d['name'],json.dumps(d),now,'agent'))
                     body={'ok':True}
+                    c.execute("UPDATE power_commands SET status='expired' WHERE name=? AND status='queued' AND expires<=?",(agent['name'],now))
+                    if d.get('powerAgent'):
+                        # Atomic claim: never deliver a power action twice, even on overlapping check-ins.
+                        cmd=c.execute("SELECT * FROM power_commands WHERE name=? AND status='queued' AND expires>? ORDER BY created LIMIT 1",(agent['name'],now)).fetchone()
+                        if cmd and c.execute("UPDATE power_commands SET status='delivered' WHERE id=? AND status='queued'",(cmd['id'],)).rowcount:
+                            body['command']={'id':cmd['id'],'action':cmd['action']}
+                            log(c,agent['name'],'power.delivered',cmd['id'])
                 else:
                     cookies=SimpleCookie(); cookies.load(env.get('HTTP_COOKIE',''))
                     token=cookies['nexus_session'].value if 'nexus_session' in cookies else ''
@@ -158,6 +176,15 @@ def application(env, start_response):
                         c.execute('UPDATE users SET password=? WHERE id=?',(password_hash(pw),u['id'])); c.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],));log(c,u['email'],'password.changed');body={'ok':True}
                     elif path=='/api/deployment/batches' and method=='GET':
                         admin(); body=[dict(r) for r in c.execute('SELECT id,created,actor,count FROM deployment_batches ORDER BY created DESC LIMIT 30')]
+                    elif path=='/api/deployment/collector-update' and method=='GET':
+                        admin()
+                        import zipfile
+                        out=io.BytesIO()
+                        with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+                            z.write(ROOT/'collectors/collector.ps1','collector.ps1')
+                            z.write(ROOT/'deployment/Update-NexusCollector.ps1','Update-NexusCollector.ps1')
+                        body=out.getvalue(); content_type='application/zip'
+                        headers.append(('Content-Disposition','attachment; filename="nexus-collector-update.zip"'))
                     elif path=='/api/deployment/prepare' and method=='POST':
                         admin(); body=deployment.prepare(c,DB,ROOT,ORIGIN,data,u['email']);log(c,u['email'],'deployment.prepared',body['id'])
                     elif path=='/api/deployment/download' and method=='POST':
@@ -233,6 +260,28 @@ def application(env, start_response):
                                 v=str(d.get(k,''));row.append("'"+v if v.lstrip().startswith(('=','+','-','@')) else v)
                             w.writerow(row)
                         body=out.getvalue().encode('utf-8-sig');content_type='text/csv';headers.append(('Content-Disposition','attachment; filename="nexus-inventory.csv"'));log(c,u['email'],'inventory.export')
+                    elif path=='/api/power' and method=='GET':
+                        require('remote.power'); require('inventory.read')
+                        name=parse_qs(env.get('QUERY_STRING','')).get('name',[''])[0]
+                        c.execute("UPDATE power_commands SET status='expired' WHERE status='queued' AND expires<=?",(now,))
+                        body=[dict(r) for r in c.execute('SELECT * FROM power_commands WHERE name=? ORDER BY created DESC LIMIT 10',(name,))]
+                    elif path=='/api/power' and method=='POST':
+                        require('remote.power'); require('inventory.read')
+                        name=str(data.get('name','')); action=data.get('action')
+                        if action not in ['shutdown','restart']: raise Fail(400,'Unsupported power action')
+                        if data.get('confirm')!=name: raise Fail(400,'Type the exact computer name to confirm')
+                        row=c.execute('SELECT * FROM devices WHERE name=?',(name,)).fetchone()
+                        agent=c.execute('SELECT * FROM agents WHERE name=? AND active=1',(name,)).fetchone()
+                        if not row or not agent or row['source']!='agent': raise Fail(400,'Active enrolled agent required')
+                        payload=json.loads(row['payload'])
+                        if not payload.get('powerAgent'): raise Fail(409,'Update the endpoint collector first')
+                        if payload.get('type')=='Server': raise Fail(403,'Server power actions are disabled')
+                        if now-row['received']>1200: raise Fail(409,'A recent agent check-in is required')
+                        if c.execute("SELECT 1 FROM power_commands WHERE name=? AND status='queued' AND expires>?",(name,now)).fetchone(): raise Fail(409,'A power action is already queued')
+                        ident=secrets.token_hex(16)
+                        c.execute('INSERT INTO power_commands VALUES(?,?,?,?,?,?,?)',(ident,name,action,u['email'],now,now+900,'queued'))
+                        log(c,u['email'],'power.queued',name+':'+action+':'+ident)
+                        body={'id':ident,'status':'queued','expires':now+900}
                     elif path=='/api/rdp' and method=='POST':
                         require('remote.rdp'); require('inventory.read'); name=str(data.get('name',''))
                         if not NAME.fullmatch(name) or not c.execute('SELECT 1 FROM devices WHERE name=?',(name,)).fetchone(): raise Fail(404,'Unknown device')

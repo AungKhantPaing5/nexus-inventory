@@ -10,19 +10,27 @@ import directory
 
 def user_counts(users, devices):
     ad, local = set(), set()
-    unknown = 0
+    classified = []
     for d in devices:
         matched = next((u for u in users if directory.match_user_device(u, d)), None)
+        kind, identity = 'unknown', ''
         if matched:
-            ad.add((matched.get('sid') or matched.get('dn') or matched.get('upn')).casefold())
-            continue
-        observed = str(d.get('user', '')).strip()
-        prefix, sep, name = observed.partition('\\')
-        if sep and name and prefix.casefold() in (str(d.get('name','')).casefold(), '.'):
-            local.add((str(d.get('name',''))+'\\'+(directory.sid_string(d.get('userSid','')) or name)).casefold())
+            kind = 'ad'
+            identity = str(matched.get('sid') or matched.get('dn') or matched.get('upn') or '').casefold()
+            ad.add(identity)
         else:
-            unknown += 1
-    return {'ad_users':len(ad),'local_users':len(local),'unknown_devices':unknown,
+            observed = str(d.get('user', '')).strip()
+            prefix, sep, name = observed.partition('\\')
+            if sep and name and prefix.casefold() in (str(d.get('name','')).casefold(), '.'):
+                kind = 'local'
+                identity = (str(d.get('name',''))+'\\'+(directory.sid_string(d.get('userSid','')) or name)).casefold()
+                local.add(identity)
+        # Opaque grouping keys let the UI count distinct users within its current filters.
+        key = __import__('hashlib').sha256(identity.encode()).hexdigest() if identity else ''
+        classified.append({'name':d['name'],'kind':kind,'user_key':key})
+    return {'ad_users':len(ad),'local_users':len(local),
+            'unknown_devices':sum(x['kind']=='unknown' for x in classified),
+            'classification':classified,
             'basis':'Distinct users in latest inventory snapshots; local accounts are scoped to each PC.'}
 
 

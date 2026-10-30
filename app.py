@@ -215,10 +215,21 @@ def application(env, start_response):
                         body=directory.list_users(directory.load_settings(c),DB,args.get('ou',[''])[0],args.get('q',[''])[0],nested=='1')
                         log(c,u['email'],'ad.users.read',body['count'])
                     elif path=='/api/ad/inventory-users' and method=='GET':
-                        require('directory.read'); require('inventory.read')
-                        result=directory.list_users(directory.load_settings(c),DB)
-                        if result['truncated']: raise Fail(409,'AD user query incomplete; user counts unavailable')
-                        body=reporting.user_counts(result['users'],[inventory_record(r) for r in c.execute('SELECT * FROM devices')])
+                        require('inventory.read')
+                        users=[]; directory_error=''
+                        if u['admin'] or 'directory.read' in json.loads(u['permissions']):
+                            try:
+                                result=directory.list_users(directory.load_settings(c),DB)
+                                if result['truncated']: raise directory.DirectoryError('AD user query incomplete. Narrow the configured Base DN.',409)
+                                users=result['users']
+                            except directory.DirectoryError as ex:
+                                directory_error=str(ex)
+                        else:
+                            directory_error='directory.read permission is required to verify AD users.'
+                        body=reporting.user_counts(users,[inventory_record(r) for r in c.execute('SELECT * FROM devices')])
+                        body['directory_error']=directory_error
+                        body['ad_available']=not bool(directory_error)
+                        if directory_error: body['ad_users']=None
                     elif path=='/api/ad/ou-devices' and method=='GET':
                         require('directory.read'); require('inventory.read')
                         args=parse_qs(env.get('QUERY_STRING',''),keep_blank_values=True)

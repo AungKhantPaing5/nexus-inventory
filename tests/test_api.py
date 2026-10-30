@@ -139,6 +139,27 @@ class ApiTest(unittest.TestCase):
         vc,vs=self.login('xlsx-viewer@example.com','123456')
         self.assertEqual(self.call('export-xlsx',data,vc,vs)['status'],403)
 
+    def test_user_classification_survives_directory_failure(self):
+        from unittest.mock import patch
+        import directory
+        cookie,csrf=self.login()
+        self.call('import',{'name':'LOCAL-ONLY-PC','user':'LOCAL-ONLY-PC\\staff','apps':[]},cookie,csrf)
+        with patch('app.directory.list_users',side_effect=directory.DirectoryError('AD temporarily unavailable')):
+            r=self.call('ad/inventory-users',cookie=cookie)
+            self.assertEqual(r['status'],200,r)
+            self.assertIsNone(r['body']['ad_users'])
+            self.assertFalse(r['body']['ad_available'])
+            local=next(x for x in r['body']['classification'] if x['name']=='LOCAL-ONLY-PC')
+            self.assertEqual(local['kind'],'local')
+            self.assertTrue(local['user_key'])
+        self.call('users',{'email':'local-count@example.com','password':'123456','permissions':['inventory.read']},cookie,csrf)
+        vc,vs=self.login('local-count@example.com','123456')
+        with patch('app.directory.list_users') as lookup:
+            r=self.call('ad/inventory-users',cookie=vc)
+            self.assertEqual(r['status'],200)
+            self.assertFalse(r['body']['ad_available'])
+            lookup.assert_not_called()
+
     def test_rate_limit(self):
         for i in range(10):self.assertEqual(self.call('login',{'email':'blocked@example.com','password':'wrong'})['status'],401)
         self.assertEqual(self.call('login',{'email':'blocked@example.com','password':'wrong'})['status'],429)

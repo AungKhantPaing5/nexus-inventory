@@ -26,3 +26,18 @@ class ReportingTest(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(reporting.workbook([]))) as z:
             for n in z.namelist(): ET.fromstring(z.read(n))
             self.assertNotIn('xl/tables/table1.xml',z.namelist())
+
+    def test_report_ad_columns_ddr_and_local_fallback(self):
+        users=[{'name':'Aung Paing','username':'ap','sid':'S-1-5-21-1-2-3-101','dn':'CN=AP,OU=NSD,OU=Staff,DC=kmd,DC=com','domain':{'netbios':'KMD0','dns':'kmd.com'}}]
+        devices=[{'name':'PC1','user':'KMD0\\ap','userSid':'S-1-5-21-1-2-3-101','receivedAt':1,'ram':8,'memoryModules':[{'capacityGB':4,'ddr':'DDR3'},{'capacityGB':4,'ddr':'DDR3'}]}, {'name':'PC2','user':'PC2\\local','receivedAt':1,'ram':16,'ddr':'DDR4'}]
+        with zipfile.ZipFile(io.BytesIO(reporting.workbook(devices,users=users))) as z:
+            root=ET.fromstring(z.read('xl/worksheets/sheet1.xml'))
+            ns={'s':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+            rows={r.get('r'):[ ''.join(c.itertext()) for c in r] for r in root.findall('s:sheetData/s:row',ns)}
+            self.assertEqual(rows['5'][3:5],['Display name','User OU'])
+            self.assertNotIn('Domain',rows['5']);self.assertNotIn('IP address',rows['5'])
+            self.assertEqual(rows['6'][3:5],['Aung Paing','Staff / NSD'])
+            self.assertEqual(rows['6'][6],'8 GB · DDR3')
+            self.assertEqual(rows['6'][11],'4 GB DDR3 + 4 GB DDR3')
+            self.assertEqual(rows['7'][3:5],['Not available','Not available'])
+            self.assertEqual(rows['7'][6],'16 GB · DDR4')

@@ -34,7 +34,7 @@ def user_counts(users, devices):
             'basis':'Distinct users in latest inventory snapshots; local accounts are scoped to each PC.'}
 
 
-def workbook(devices, scope='All user OUs'):
+def workbook(devices, scope='All user OUs', users=None):
     """Inline-string cells prevent spreadsheet formula injection. No external links/macros."""
     ns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'
     def xml(s):
@@ -48,20 +48,29 @@ def workbook(devices, scope='All user OUs'):
     rows=[f'<row r="1" ht="34" customHeight="1">{cell(0,1,"NSD AD Client Inventory",1)}</row>',
           f'<row r="2" ht="26" customHeight="1">{cell(0,2,"Device inventory report · "+now,2)}</row>',
           f'<row r="3" ht="28" customHeight="1">{cell(0,3,f"{len(devices)} devices | {recent} recent check-ins | User OU: {scope}",2)}</row>']
-    headers=['Device name','Status','Assigned user','Processor','Memory (GB)','Storage','Uptime','Operating system','Domain','IP address','Last check-in (MMT)','RAM modules']
+    headers=['Device name','Status','Assigned user','Display name','User OU','Processor','Memory','Storage','Uptime','Operating system','Last check-in (MMT)','RAM modules']
     rows.append('<row r="5" ht="30" customHeight="1">'+''.join(cell(i,5,h,3) for i,h in enumerate(headers))+'</row>')
     for row,d in enumerate(devices,6):
         seen=datetime.fromtimestamp(d['receivedAt'],timezone(timedelta(hours=6,minutes=30))).strftime('%Y-%m-%d %H:%M:%S')
-        modules=' + '.join(str(m['capacityGB']).removesuffix('.0')+' GB' for m in d.get('memoryModules',[])) or 'Not reported'
-        values=[d.get('name',''),d.get('status',''),d.get('user',''),d.get('cpu',''),d.get('ram',0),d.get('storage',''),d.get('uptime',''),d.get('os',''),d.get('domain',''),d.get('ip',''),seen,modules]
+        matched = next((u for u in (users or []) if directory.match_user_device(u,d)), None)
+        display_name = matched.get('name','') if matched else 'Not available'
+        ou = 'Not available'
+        if matched:
+            # Show the user OU hierarchy without exposing the LDAP DN syntax.
+            parts = directory.parse_dn(matched.get('dn',''), escape=False, strip=True)
+            ou = ' / '.join(v for a,v,_ in reversed(parts) if a.casefold()=='ou') or 'No user OU'
+        modules=' + '.join(str(m['capacityGB']).removesuffix('.0')+' GB'+(' '+str(m['ddr']) if m.get('ddr') else '') for m in d.get('memoryModules',[])) or 'Not reported'
+        ddr = ' / '.join(dict.fromkeys(str(m['ddr']) for m in d.get('memoryModules',[]) if m.get('ddr'))) or str(d.get('ddr') or 'DDR not reported')
+        memory = str(d.get('ram',0)).removesuffix('.0')+' GB · '+ddr
+        values=[d.get('name',''),d.get('status',''),d.get('user',''),display_name,ou,d.get('cpu',''),memory,d.get('storage',''),d.get('uptime',''),d.get('os',''),seen,modules]
         cells=[]
         for i,value in enumerate(values):
-            style=7 if i==4 else (5 if value=='Recent' else 6) if i==1 else 4
-            cells.append(cell(i,row,value,style,i==4))
-        height=min(409,max(42,14*max(math.ceil(len(str(v))/max(8,w-3)) for v,w in zip(values,[24,17,29,48,17,60,22,34,24,27,25,30]))+12))
+            style=(5 if value=='Recent' else 6) if i==1 else 4
+            cells.append(cell(i,row,value,style))
+        height=min(409,max(42,14*max(math.ceil(len(str(v))/max(8,w-3)) for v,w in zip(values,[24,17,29,29,32,48,25,60,22,34,25,38]))+12))
         rows.append(f'<row r="{row}" ht="{height}" customHeight="1">'+''.join(cells)+'</row>')
     last=max(5,len(devices)+5)
-    widths=[24,17,29,48,17,60,22,34,24,27,25,30]
+    widths=[24,17,29,29,32,48,25,60,22,34,25,38]
     cols=''.join(f'<col min="{i}" max="{i}" width="{w}" customWidth="1"/>' for i,w in enumerate(widths,1))
     table_parts='<tableParts count="1"><tablePart r:id="rId1"/></tableParts>' if devices else ''
     sheet=f'''<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="{ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="A1:L{last}"/><sheetViews><sheetView workbookViewId="0" showGridLines="0"><pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A6" sqref="A6"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="20"/><cols>{cols}</cols><sheetData>{''.join(rows)}</sheetData><autoFilter ref="A5:L{last}"/><mergeCells count="3"><mergeCell ref="A1:L1"/><mergeCell ref="A2:L2"/><mergeCell ref="A3:L3"/></mergeCells><printOptions horizontalCentered="1"/><pageMargins left="0.25" right="0.25" top="0.4" bottom="0.4" header="0.2" footer="0.2"/><pageSetup paperSize="9" orientation="landscape" fitToWidth="1" fitToHeight="0"/>{table_parts}</worksheet>'''

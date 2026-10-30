@@ -286,7 +286,18 @@ def application(env, start_response):
                         if not isinstance(names,list) or len(names)>10000 or any(not isinstance(n,str) or not NAME.fullmatch(n) for n in names): raise Fail(400,'Invalid device selection')
                         by_name={r['name'].casefold():inventory_record(r) for r in c.execute('SELECT * FROM devices')}
                         if len({n.casefold() for n in names})!=len(names) or any(n.casefold() not in by_name for n in names): raise Fail(400,'Unknown or duplicate device')
-                        body=reporting.workbook([by_name[n.casefold()] for n in names],str(data.get('scope','All user OUs'))[:200])
+                        export_users=[]
+                        export_scope=str(data.get('scope','All user OUs'))[:200]
+                        if u['admin'] or 'directory.read' in json.loads(u['permissions']):
+                            try:
+                                result=directory.list_users(directory.load_settings(c),DB)
+                                if result.get('truncated'): raise directory.DirectoryError('AD user results are incomplete')
+                                export_users=result['users']
+                            except directory.DirectoryError:
+                                export_scope+=' | AD display names and OUs unavailable'
+                        else:
+                            export_scope+=' | AD display names and OUs require directory.read'
+                        body=reporting.workbook([by_name[n.casefold()] for n in names],export_scope,export_users)
                         content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                         headers.append(('Content-Disposition','attachment; filename="NSD-AD-Client-Inventory.xlsx"'))
                         log(c,u['email'],'inventory.export.xlsx',len(names))
